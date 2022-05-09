@@ -1333,6 +1333,7 @@ class TableEntry(_P4EntityBase):
         self._counter_data = None
         self._meter_config = None
         self.metadata = b""
+        self.idle_timeout_ns = 0
         self.__doc__ = """
 An entry for table '{}'
 
@@ -1372,6 +1373,8 @@ To set the priority, use <self>.priority = <expr>.
 To mark the entry as default, use <self>.is_default = True.
 
 To add metadata to the entry, use <self>.metadata = <expr>.
+
+To set the idle timeout, use <self>.idle_timeout_ns = <expr>.
 """
         if ap is None:
             self.__doc__ += """
@@ -1413,7 +1416,7 @@ For information about how to read table entries, use <self>.read?
 
     def __dir__(self):
         d = super().__dir__() + [
-            "match", "priority", "is_default", "metadata",
+            "match", "priority", "is_default", "metadata", "idle_timeout_ns",
             "clear_action", "clear_match", "clear_counter_data", "clear_meter_config"]
         if self._support_groups:
             d.extend(["member_id", "group_id", "oneshot"])
@@ -1545,6 +1548,9 @@ For information about how to read table entries, use <self>.read?
         elif name == "metadata":
             if type(value) is not bytes:
                 raise UserError("metadata must be a byte string")
+        elif name == "idle_timeout_ns":
+            if type(value) is not int:
+                raise UserError("idle_timeout_ns must be an integer")
         super().__setattr__(name, value)
 
     def __getattr__(self, name):
@@ -1584,6 +1590,7 @@ For information about how to read table entries, use <self>.read?
         self.priority = msg.priority
         self.is_default = msg.is_default_action
         self.metadata = msg.metadata
+        self.idle_timeout_ns = msg.idle_timeout_ns
         for mf in msg.match:
             mf_name = context.get_mf_name(self.name, mf.field_id)
             self.match._mk[mf_name] = mf
@@ -1637,6 +1644,7 @@ For information about how to read table entries, use <self>.read?
         entry.priority = self.priority
         entry.is_default_action = self.is_default
         entry.metadata = self.metadata
+        entry.idle_timeout_ns = self.idle_timeout_ns
         if self._action_spec_type == self._ActionSpecType.DIRECT_ACTION:
             entry.action.action.CopyFrom(self._action_spec.msg())
         elif self._action_spec_type == self._ActionSpecType.MEMBER_ID:
@@ -2507,6 +2515,58 @@ def APIVersion():
     """
     return client.api_version()
 
+class IdleTimeoutNotify():
+    def __init__(self):
+        self.idle_timeout_queue = queue.Queue()
+
+        def _idle_timeout_recv_func(idle_timeout_queue):
+            while True:
+                msg = client.get_stream_packet("idle_timeout_notification", timeout=None)
+                if not msg:
+                    break
+                idle_timeout_queue.put(msg)
+
+        self.recv_t = Thread(target=_idle_timeout_recv_func, args=(self.idle_timeout_queue, ))
+        self.recv_t.start()
+
+    def sniff(self, function=None, timeout=None):
+        """
+        Return an interator of idle_timeout_notification messages.
+        If the function is provided, we do not return an iterator and instead we apply
+        the function to every idle_timeout_notification message.
+        """
+        msgs = []
+        if timeout is not None and timeout < 0:
+            raise ValueError("Timeout can't be a negative number.")
+
+        if timeout is None:
+            while True:
+                try:
+                    msgs.append(self.idle_timeout_queue.get(block=True))
+                except KeyboardInterrupt:
+                    # User sends a Ctrl+C -> breaking
+                    break
+
+        else:  # timeout parameter is provided
+            deadline = time.time() + timeout
+            remaining_time = timeout
+            while remaining_time > 0:
+                try:
+                    msgs.append(self.idle_timeout_queue(block=True, timeout=remaining_time))
+                    remaining_time = deadline - time.time()
+                except KeyboardInterrupt:
+                    # User sends an interrupt(e.g., Ctrl+C).
+                    break
+                except queue.Empty:
+                    # No item available on timeout. Exiting
+                    break
+
+        if function is None:
+            return iter(msgs)
+        else:
+            for msg in msgs:
+                function(msg)
+    
 
 # see https://ipython.readthedocs.io/en/stable/config/details.html
 class MyPrompt(Prompts):
@@ -2663,6 +2723,7 @@ def main():
     user_ns["clone_session_entry"] = CloneSessionEntry
     user_ns["packet_in"] = PacketIn()  # Singleton packet_in object to handle all packet-in cases
     user_ns["packet_out"] = PacketOut
+    user_ns["idle_timeout"] = IdleTimeoutNotify()
 
     start_ipython(user_ns=user_ns, config=c, argv=[])
 

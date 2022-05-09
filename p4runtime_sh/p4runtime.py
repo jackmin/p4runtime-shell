@@ -154,6 +154,7 @@ class P4RuntimeClient:
             "arbitration": queue.Queue(),
             "packet": queue.Queue(),
             "digest": queue.Queue(),
+            "idle_timeout_notification": queue.Queue(),
             "unknown": queue.Queue(),
         }
 
@@ -174,6 +175,8 @@ class P4RuntimeClient:
                         self.stream_in_q["packet"].put(p)
                     elif p.HasField("digest"):
                         self.stream_in_q["digest"].put(p)
+                    elif p.HasField("idle_timeout_notification"):
+                        self.stream_in_q["idle_timeout_notification"].put(p)
                     else:
                         self.stream_in_q["unknown"].put(p)
             try:
